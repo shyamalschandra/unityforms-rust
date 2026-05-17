@@ -1,0 +1,6 @@
+.cursorindexingignore
+
+/target
+**/*.rs.bk
+.DS_Store
+.specstory/

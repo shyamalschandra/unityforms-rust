@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/unityform-core",
+    "crates/unityform-platform",
+    "crates/unityform-windows",
+    "examples/minimal_window",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.78"

@@ -1,0 +1,8 @@
+[package]
+name = "unityform-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Platform-agnostic core types and control model for a WinForms-inspired Rust UI stack"
+
+[dependencies]
