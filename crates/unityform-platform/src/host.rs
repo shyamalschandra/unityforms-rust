@@ -1,88 +1,193 @@
-//! Per-top-level-window host: binds `HWND` notifies to closures (WinForms-style `Click`).
+//! Per-top-level-window host: Win32 child graph, `WM_COMMAND` routing, and docked layout.
 
 #![cfg(windows)]
 
 use core::ffi::c_void;
 use std::collections::HashMap;
 
-use core::ffi::c_void;
+use unityform_core::{dock_top_stack, inset_rect, Margin, Rectangle as ClientRect};
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::{
-    Graphics::Gdi::{GetStockObject, HBRUSH, WHITE_BRUSH},
+    Foundation::{HINSTANCE, HWND, LPARAM, WPARAM},
     UI::WindowsAndMessaging::{
-        CreateWindowExW, HMENU, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CHILD, WS_VISIBLE,
+        CreateWindowExW, GetClientRect, MoveWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+        HMENU,
+        WS_CHILD, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
     },
 };
-use windows::core::{Result as WinResult, w, PCWSTR};
+use windows::Win32::{
+    Graphics::Gdi::{GetStockObject, HBRUSH, WHITE_BRUSH},
+};
+use windows::core::{w, PCWSTR};
+use windows::core::Result as WinResult;
 
-/// Tracks child control ids ↔ handlers for `WM_COMMAND` just like WinForms routes `BN_CLICKED`.
 pub struct HostState {
-    handlers: HashMap<u32, Box<dyn FnMut()>>,
-    seq: u32,
     pub instance: HINSTANCE,
+    seq: u32,
+    button_handlers: HashMap<u32, Box<dyn FnMut()>>,
+    dock_top: Vec<(HWND, i32)>,
+    fill_edit: Option<(HWND, u32)>,
 }
 
 impl HostState {
     pub fn new(instance: HINSTANCE) -> Self {
         Self {
-            handlers: HashMap::new(),
-            seq: 1000,
             instance,
+            seq: 1000,
+            button_handlers: HashMap::new(),
+            dock_top: Vec::new(),
+            fill_edit: None,
         }
     }
 
-    /// Native push button (`CreateWindowExW` + `"BUTTON"`). Invokes `on_click` on `BN_CLICKED`.
-    pub unsafe fn create_push_button(
+    fn next_id(&mut self) -> u32 {
+        self.seq = self.seq.saturating_add(1);
+        self.seq
+    }
+
+    unsafe fn menu_id(id: u32) -> HMENU {
+        HMENU(id as *mut c_void)
+    }
+
+    pub unsafe fn relayout(&mut self, parent: HWND) -> WinResult<()> {
+        let mut rr = windows::Win32::Foundation::RECT::default();
+        GetClientRect(parent, &mut rr).ok()?;
+        let cw = rr.right - rr.left;
+        let ch = rr.bottom - rr.top;
+        let client = ClientRect::from_xywh(0, 0, cw, ch);
+        let band_heights: Vec<i32> = self.dock_top.iter().map(|(_, h)| *h).collect();
+        let (bands, remainder) = dock_top_stack(client, &band_heights);
+
+        for (i, (hwnd, _)) in self.dock_top.iter().enumerate() {
+            if let Some(r) = bands.get(i) {
+                MoveWindow(*hwnd, r.x, r.y, r.width, r.height, true)?;
+            }
+        }
+
+        if let Some((edit_hwnd, _)) = self.fill_edit {
+            let editor = inset_rect(remainder, Margin::uniform(8));
+            MoveWindow(
+                edit_hwnd,
+                editor.x,
+                editor.y,
+                editor.width,
+                editor.height,
+                true,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub unsafe fn create_docked_toolbar_button(
         &mut self,
         parent: HWND,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
         caption: PCWSTR,
+        band_height: i32,
         on_click: impl FnMut() + 'static,
     ) -> WinResult<()> {
-        let cmd_id = self.seq.saturating_add(1);
-
-        match CreateWindowExW(
+        let id = self.next_id();
+        let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             w!("BUTTON"),
             caption,
-            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(0),
-            x,
-            y,
-            width,
-            height,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(0),
+            0,
+            0,
+            10,
+            band_height.max(24),
             parent,
-            HMENU(cmd_id as *mut c_void),
+            Self::menu_id(id),
             self.instance,
             None,
-        ) {
-            Ok(_) => {
-                self.seq = cmd_id;
-                self.handlers.insert(cmd_id, Box::new(on_click));
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
+        )?;
+        self.dock_top.push((hwnd, band_height));
+        self.button_handlers.insert(id, Box::new(on_click));
+        Ok(())
     }
 
-    /// Returns `true` when the notify code was dispatched to a Rust handler.
+    pub unsafe fn create_docked_caption_strip(
+        &mut self,
+        parent: HWND,
+        caption: PCWSTR,
+        band_height: i32,
+    ) -> WinResult<()> {
+        let id = self.next_id();
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("STATIC"),
+            caption,
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(0),
+            0,
+            0,
+            10,
+            band_height.max(18),
+            parent,
+            Self::menu_id(id),
+            self.instance,
+            None,
+        )?;
+        self.dock_top.push((hwnd, band_height));
+        Ok(())
+    }
+
+    pub unsafe fn attach_fill_multiline_editor(
+        &mut self,
+        parent: HWND,
+        placeholder: PCWSTR,
+    ) -> WinResult<()> {
+        let edit_id = self.next_id();
+
+        let style = WS_CHILD
+            | WS_VISIBLE
+            | WS_TABSTOP
+            | WS_BORDER
+            | WS_VSCROLL
+            | WINDOW_STYLE(
+                (ES_LEFT
+                    | ES_MULTILINE
+                    | ES_AUTOVSCROLL
+                    | ES_WANTRETURN) as u32,
+            );
+
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("EDIT"),
+            placeholder,
+            style,
+            0,
+            0,
+            120,
+            120,
+            parent,
+            Self::menu_id(edit_id),
+            self.instance,
+            None,
+        )?;
+        self.fill_edit = Some((hwnd, edit_id));
+        Ok(())
+    }
+
     pub fn dispatch_wm_command(&mut self, wparam: WPARAM, _lparam: LPARAM) -> bool {
         const BN_CLICKED: u16 = 0;
+        const EN_CHANGE: u16 = 0x0300;
 
         let notify = hiword_wp(wparam);
-        if notify != BN_CLICKED {
-            return false;
-        }
+        let ctrl_id = loword_wp(wparam) as u32;
 
-        let id = loword_wp(wparam) as u32;
-        let Some(handler) = self.handlers.get_mut(&id) else {
-            return false;
-        };
-        (**handler)();
-        true
+        if notify == BN_CLICKED {
+            if let Some(h) = self.button_handlers.get_mut(&ctrl_id) {
+                (**h)();
+                return true;
+            }
+        } else if notify == EN_CHANGE {
+            if let Some((_, edit_id)) = self.fill_edit {
+                if edit_id == ctrl_id {
+                    println!("TRACE: EDIT EN_CHANGE for control id={ctrl_id}");
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 

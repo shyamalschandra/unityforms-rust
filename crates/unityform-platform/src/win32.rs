@@ -7,7 +7,7 @@ use core::ffi::c_void;
 use unityform_core::{ComponentId, Rectangle};
 
 use windows::Win32::{
-    Foundation::{ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, PCWSTR, RECT, WPARAM},
+    Foundation::{ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, PCWSTR, WPARAM},
     Graphics::Gdi::{BeginPaint, EndPaint, FillRect, PAINTSTRUCT},
     System::LibraryLoader::GetModuleHandleW,
     UI::WindowsAndMessaging::*,
@@ -45,6 +45,14 @@ unsafe extern "system" fn dispatch_window_message(
             LRESULT(0)
         },
         WM_ERASEBKGND => LRESULT(1),
+        WM_SIZE => unsafe {
+            if wparam.0 as u32 != SIZE_MINIMIZED {
+                if let Some(raw) = hwnd_host(hwnd) {
+                    let _ = (&mut *raw).relayout(hwnd);
+                }
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        },
         WM_COMMAND => unsafe {
             if let Some(raw) = hwnd_host(hwnd) {
                 let handled =
@@ -115,24 +123,20 @@ fn position_form_window(hwnd: HWND) -> WinResult<()> {
 
 fn populate_demo(host: &mut HostState, form_hwnd: HWND) -> WinResult<()> {
     unsafe {
-        let mut client = RECT::default();
-        if !GetClientRect(form_hwnd, &mut client).as_bool() {
-            return Err(windows::core::Error::from_win32());
-        }
-
-        let pad = 16i32;
-
-        host.create_push_button(
+        host.create_docked_toolbar_button(
             form_hwnd,
-            pad,
-            pad,
-            (client.right - client.left).saturating_sub(pad.saturating_mul(2)),
-            34,
-            w!("Rust / Win32 unityform-platform — click handler"),
+            w!("Run demo (native BUTTON + WM_COMMAND)"),
+            48,
             || {
-                println!("BN_CLICKED: WinForms-equivalent routed from WM_COMMAND.");
+                println!("BN_CLICKED: WinForms-style toolbar command.");
             },
         )?;
+        host.create_docked_caption_strip(form_hwnd, w!("Notes — multiline EDIT below"), 28)?;
+        host.attach_fill_multiline_editor(
+            form_hwnd,
+            w!("Type here — EN_CHANGE is traced to the console while you edit."),
+        )?;
+        host.relayout(form_hwnd)?;
     }
     Ok(())
 }
@@ -145,7 +149,7 @@ fn create_primitive_host_window(instance: HINSTANCE, host: *mut HostState) -> Wi
         CreateWindowExW(
             ex_style,
             w!("UnityForm.Minimal.Window"),
-            w!("UnityForm prototype — HWND host + BUTTON child"),
+            w!("UnityForm — Win32 docked chrome (BUTTON + STATIC + EDIT)"),
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,

@@ -18,6 +18,7 @@ windows = { version = "0.58", features = [
 ] }
 
 [target.'cfg(not(windows))'.dependencies]
+font8x8 = "0.3.1"
 raw-window-handle = "0.6.2"
 softbuffer = "0.4.8"
 winit = "0.29.15"
